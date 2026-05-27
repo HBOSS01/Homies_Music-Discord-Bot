@@ -1,0 +1,4 @@
+# Force GitHub Linguist to detect Python as the primary language
+*.py linguist-detectable=true
+*.bat linguist-vendored=true
+*.ps1 linguist-vendored=true

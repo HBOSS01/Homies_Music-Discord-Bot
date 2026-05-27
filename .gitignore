@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+venv/
+.venv/
+env/
+
+# Environment & secrets
+.env
+token.txt
+update_lavalink.ps1
+
+# Lavalink
+lavalink/Lavalink.jar
+lavalink/Lavalink.jar.bak
+lavalink/plugins/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/

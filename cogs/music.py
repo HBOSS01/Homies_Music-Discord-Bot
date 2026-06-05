@@ -451,7 +451,57 @@ class Music(commands.Cog):
                 embed=self._simple_embed("❌  No results found.", C_RED)
             )
 
-        track = tracks[0] if isinstance(tracks, list) else tracks.tracks[0]
+        # ── Playlist ───────────────────────────────────────────────────────────
+        if isinstance(tracks, wavelink.Playlist):
+            playlist       = tracks
+            playlist_tracks = playlist.tracks
+            if not playlist_tracks:
+                return await interaction.followup.send(
+                    embed=self._simple_embed("❌  That playlist appears to be empty.", C_RED)
+                )
+
+            for t in playlist_tracks:
+                state.requested_by[t.identifier] = interaction.user
+
+            total_ms = sum(t.length or 0 for t in playlist_tracks)
+
+            if player.current:
+                # Already playing — queue every track in playlist order
+                for t in playlist_tracks:
+                    await player.queue.put_wait(t)
+                queue_pos = len(player.queue) - len(playlist_tracks) + 1
+                embed = discord.Embed(
+                    description=(
+                        f"📋  **[{playlist.name}]({query})**\n"
+                        f"`{len(playlist_tracks)}` tracks  •  ⏱ `{duration_fmt(total_ms)}`"
+                        f"  •  📍 starts at `#{queue_pos}`"
+                        f"  •  👤 {interaction.user.mention}"
+                    ),
+                    color=C_BLUE,
+                )
+                art = getattr(playlist, "artwork", None)
+                if art:
+                    embed.set_thumbnail(url=art)
+                self._footer(embed, "Use /queue to see the full queue")
+                await interaction.followup.send(embed=embed)
+            else:
+                # Nothing playing — play first, queue the rest in order
+                first = playlist_tracks[0]
+                for t in playlist_tracks[1:]:
+                    await player.queue.put_wait(t)
+                await player.set_filters(_build_filters(state.eq_preset))
+                await player.play(first)
+                await interaction.followup.send(
+                    embed=self._simple_embed(
+                        f"▶️  Playing playlist **{playlist.name}** — `{len(playlist_tracks)}` tracks queued.",
+                        C_PURPLE,
+                    ),
+                    ephemeral=True,
+                )
+            return
+
+        # ── Single track ───────────────────────────────────────────────────────
+        track = tracks[0]
         state.requested_by[track.identifier] = interaction.user
 
         if player.current:

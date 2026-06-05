@@ -446,6 +446,9 @@ class Music(commands.Cog):
                 embed=self._simple_embed(f"❌  Search failed: `{exc}`", C_RED)
             )
 
+        print(f"[music] search result: type={type(tracks).__name__}, "
+              f"count={len(tracks.tracks) if isinstance(tracks, wavelink.Playlist) else len(tracks)}")
+
         if not tracks:
             return await interaction.followup.send(
                 embed=self._simple_embed("❌  No results found.", C_RED)
@@ -453,28 +456,30 @@ class Music(commands.Cog):
 
         # ── Playlist ───────────────────────────────────────────────────────────
         if isinstance(tracks, wavelink.Playlist):
-            playlist       = tracks
-            playlist_tracks = playlist.tracks
-            if not playlist_tracks:
+            playlist    = tracks
+            pl_tracks   = playlist.tracks
+            print(f"[music] playlist '{playlist.name}': {len(pl_tracks)} tracks loaded")
+
+            if not pl_tracks:
                 return await interaction.followup.send(
                     embed=self._simple_embed("❌  That playlist appears to be empty.", C_RED)
                 )
 
-            for t in playlist_tracks:
+            for t in pl_tracks:
                 state.requested_by[t.identifier] = interaction.user
 
-            total_ms = sum(t.length or 0 for t in playlist_tracks)
+            total_ms = sum(t.length or 0 for t in pl_tracks)
 
             if player.current:
-                # Already playing — queue every track in playlist order
-                for t in playlist_tracks:
-                    await player.queue.put_wait(t)
-                queue_pos = len(player.queue) - len(playlist_tracks) + 1
+                # Already playing — add whole playlist to end of queue in one call
+                q_before = len(player.queue)
+                added    = await player.queue.put_wait(playlist)
+                print(f"[music] queued {added} tracks (queue was {q_before}, now {len(player.queue)})")
                 embed = discord.Embed(
                     description=(
                         f"📋  **[{playlist.name}]({query})**\n"
-                        f"`{len(playlist_tracks)}` tracks  •  ⏱ `{duration_fmt(total_ms)}`"
-                        f"  •  📍 starts at `#{queue_pos}`"
+                        f"`{added}` tracks  •  ⏱ `{duration_fmt(total_ms)}`"
+                        f"  •  📍 starts at `#{q_before + 1}`"
                         f"  •  👤 {interaction.user.mention}"
                     ),
                     color=C_BLUE,
@@ -485,15 +490,15 @@ class Music(commands.Cog):
                 self._footer(embed, "Use /queue to see the full queue")
                 await interaction.followup.send(embed=embed)
             else:
-                # Nothing playing — play first, queue the rest in order
-                first = playlist_tracks[0]
-                for t in playlist_tracks[1:]:
-                    await player.queue.put_wait(t)
+                # Nothing playing — queue all tracks then pop first to play
+                added = await player.queue.put_wait(playlist)
+                print(f"[music] queued {added} tracks, starting playback")
+                first = player.queue.get()   # removes track 1 from queue; tracks 2-N stay
                 await player.set_filters(_build_filters(state.eq_preset))
                 await player.play(first)
                 await interaction.followup.send(
                     embed=self._simple_embed(
-                        f"▶️  Playing playlist **{playlist.name}** — `{len(playlist_tracks)}` tracks queued.",
+                        f"▶️  Playing playlist **{playlist.name}** — `{added}` tracks queued.",
                         C_PURPLE,
                     ),
                     ephemeral=True,

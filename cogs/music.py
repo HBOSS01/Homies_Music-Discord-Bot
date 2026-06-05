@@ -80,6 +80,7 @@ class GuildState:
         self.player_message:  discord.Message | None     = None
         self.inactivity_task: asyncio.Task | None        = None
         self.eq_preset:       str                        = "loud"
+        self.autoplay:        bool                       = False
 
 
 # ── Embed builders ─────────────────────────────────────────────────────────────
@@ -105,6 +106,7 @@ def _player_embed(
 
     embed.add_field(name="⏳ Duration",     value=f"`{duration_fmt(track.length)}`", inline=True)
     embed.add_field(name="👤 Requested by", value=requester.display_name if requester else "Unknown", inline=True)
+    embed.add_field(name="🔄 Autoplay",    value="ON" if state.autoplay else "OFF",                  inline=True)
 
     if requester:
         embed.set_footer(text=f"Requested by {requester.display_name}", icon_url=requester.display_avatar.url)
@@ -366,7 +368,6 @@ class Music(commands.Cog):
         if player.current:
             return
 
-        # Queue is empty — edit existing message to "Queue ended"
         if track:
             state.history.append(track)
 
@@ -376,6 +377,11 @@ class Music(commands.Cog):
             except Exception:
                 pass
 
+        # Autoplay ON: wavelink will fetch a YouTube recommendation and fire track_start
+        if state.autoplay:
+            return
+
+        # Queue truly empty — show disabled card and start inactivity timer
         disabled_view = MusicPlayerView(state, guild, self.bot, disabled=True)
         ended_embed   = discord.Embed(description="😴  Queue ended.", color=C_GREY)
         self._footer(ended_embed)
@@ -427,7 +433,7 @@ class Music(commands.Cog):
 
         if player is None:
             player = await vc_channel.connect(cls=wavelink.Player)
-            player.autoplay = wavelink.AutoPlayMode.partial
+            player.autoplay = wavelink.AutoPlayMode.enabled if state.autoplay else wavelink.AutoPlayMode.partial
         elif player.channel != vc_channel:
             await player.move_to(vc_channel)
 
@@ -620,6 +626,35 @@ class Music(commands.Cog):
         await player.set_filters(_build_filters(preset.value))
         label = self._EQ_LABELS.get(preset.value, preset.value)
         await interaction.followup.send(embed=self._simple_embed(f"🎛️  EQ → **{label}**", C_GREEN), ephemeral=True)
+
+
+    # ── /autoplay ────────────────────────────────────────────────────────────────
+    @app_commands.command(name="autoplay", description="Toggle autoplay — plays similar songs when the queue ends")
+    async def autoplay_cmd(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        state = self.get_state(interaction.guild_id)
+        state.autoplay = not state.autoplay
+
+        player: wavelink.Player | None = interaction.guild.voice_client  # type: ignore
+        if player:
+            player.autoplay = (
+                wavelink.AutoPlayMode.enabled if state.autoplay else wavelink.AutoPlayMode.partial
+            )
+
+        if state.autoplay:
+            await interaction.followup.send(
+                embed=self._simple_embed(
+                    "🔄  Autoplay **enabled** — similar songs will automatically play when the queue ends.",
+                    C_GREEN,
+                )
+            )
+        else:
+            await interaction.followup.send(
+                embed=self._simple_embed(
+                    "🔄  Autoplay **disabled** — the player will stop when the queue is empty.",
+                    C_GREY,
+                )
+            )
 
 
 async def setup(bot: commands.Bot):

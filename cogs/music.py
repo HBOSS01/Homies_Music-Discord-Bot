@@ -380,6 +380,12 @@ class Music(commands.Cog):
         if state.autoplay:
             return
 
+        # Manually advance to the next track in queue (don't rely on AutoPlayMode)
+        if len(player.queue) > 0:
+            next_track = player.queue.get()
+            await player.play(next_track)
+            return
+
         # Queue truly empty — show disabled card and start inactivity timer
         disabled_view = MusicPlayerView(state, guild, self.bot, disabled=True)
         ended_embed   = discord.Embed(description="😴  Queue ended.", color=C_GREY)

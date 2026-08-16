@@ -1,0 +1,22 @@
+[Unit]
+Description=Homies Music Discord Bot (Lavalink + Bot)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=homies
+WorkingDirectory=/home/homies/homies_music
+ExecStart=/bin/bash /home/homies/homies_music/start.sh
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Environment hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/home/homies/homies_music
+
+[Install]
+WantedBy=multi-user.target

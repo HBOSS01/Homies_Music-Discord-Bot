@@ -27,8 +27,9 @@ lavalink:
       soundcloud: true
       bandcamp: true
       http: true
-    bufferDurationMs: 400
-    frameBufferDurationMs: 5000
+    bufferDurationMs: 800
+    frameBufferDurationMs: 8000
+    opusEncodingQuality: 10
     youtubeSearchEnabled: true
     soundcloudSearchEnabled: true
 logging:

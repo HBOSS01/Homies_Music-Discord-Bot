@@ -36,12 +36,11 @@ def _build_filters(preset: str) -> wavelink.Filters:
         ])
     elif preset == "loud":
         f.equalizer.set(bands=[
-            {"band": 0,  "gain": 0.25}, {"band": 1,  "gain": 0.15},
-            {"band": 2,  "gain": 0.05}, {"band": 10, "gain": 0.05},
-            {"band": 11, "gain": 0.10}, {"band": 12, "gain": 0.15},
-            {"band": 13, "gain": 0.20}, {"band": 14, "gain": 0.15},
+            {"band": 0,  "gain": 0.12}, {"band": 1,  "gain": 0.08},
+            {"band": 2,  "gain": 0.04}, {"band": 10, "gain": 0.03},
+            {"band": 11, "gain": 0.06}, {"band": 12, "gain": 0.08},
+            {"band": 13, "gain": 0.10}, {"band": 14, "gain": 0.08},
         ])
-        f.volume = 1.1
     return f
 
 
@@ -79,7 +78,7 @@ class GuildState:
         self.text_channel:    discord.TextChannel | None = None
         self.player_message:  discord.Message | None     = None
         self.inactivity_task: asyncio.Task | None        = None
-        self.eq_preset:       str                        = "loud"
+        self.eq_preset:       str                        = "flat"
         self.autoplay:        bool                       = False
 
 

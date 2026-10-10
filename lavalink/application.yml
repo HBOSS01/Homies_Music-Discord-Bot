@@ -39,6 +39,7 @@ lavalink:
     bufferDurationMs: 800
     frameBufferDurationMs: 8000
     opusEncodingQuality: 10
+    resamplingQuality: HIGH
     youtubeSearchEnabled: true
     soundcloudSearchEnabled: true
 logging:

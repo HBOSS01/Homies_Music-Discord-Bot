@@ -8,7 +8,7 @@ from discord.ext import commands
 INACTIVITY_TIMEOUT = 180
 
 # ── Color palette ──────────────────────────────────────────────────────────────
-C_PURPLE = 0x9B59B6
+C_PURPLE = 0x8B5CF6
 C_BLUE   = 0x5865F2
 C_GREEN  = 0x57F287
 C_YELLOW = 0xFEE75C
@@ -81,41 +81,100 @@ class GuildState:
         self.eq_preset:       str                        = "flat"
         self.autoplay:        bool                       = False
         self.search_fallbacks: set[str]                  = set()
+        self.progress_task:   asyncio.Task | None        = None
+        self.liked_tracks:    dict[str, set[int]]        = {}
 
 
 # ── Embed builders ─────────────────────────────────────────────────────────────
+def _progress_bar(position_ms: int, duration_ms: int | None, width: int = 14) -> str:
+    if not duration_ms or duration_ms <= 0:
+        return "🔴 LIVE"
+
+    progress = min(max(position_ms / duration_ms, 0.0), 1.0)
+    marker = min(round(progress * (width - 1)), width - 1)
+    return f"{'━' * marker}🟣{'─' * (width - marker - 1)}"
+
+
 def _player_embed(
     track: wavelink.Playable,
     state: GuildState,
     bot: commands.Bot,
     *,
+    player: wavelink.Player | None = None,
     paused: bool = False,
 ) -> discord.Embed:
     requester = state.requested_by.get(track.identifier)
-    status    = "⏸  Paused" if paused else "▶  Now Playing"
+    status = "⏸  PAUSED" if paused else "♫  NOW PLAYING"
+    duration = track.length or 0
+    position = min(player.position, duration) if player and duration else 0
+    repeat_mode = player.queue.mode if player else wavelink.QueueMode.normal
+    repeat = (
+        "Track" if repeat_mode == wavelink.QueueMode.loop
+        else "Queue" if repeat_mode == wavelink.QueueMode.loop_all
+        else "Off"
+    )
+    volume = player.volume if player else 100
 
     embed = discord.Embed(
         title=status,
-        description=f"**[{track.title}]({track.uri})**\nby {track.author or 'Unknown'}",
-        color=C_YELLOW if paused else C_PURPLE,
+        description=(
+            f"**[{track.title}]({track.uri})**\n"
+            f"{track.author or 'Unknown artist'}\n\n"
+            f"`{duration_fmt(position)}`  {_progress_bar(position, duration)}  "
+            f"`{duration_fmt(duration)}`\n"
+            f"🔊 Volume **{volume}%**  ·  🔁 Repeat **{repeat}**"
+        ),
+        color=C_PURPLE,
     )
 
     art = getattr(track, "artwork", None) or getattr(track, "thumbnail", None)
     if art:
-        embed.set_image(url=art)
-
-    embed.add_field(name="⏳ Duration",     value=f"`{duration_fmt(track.length)}`", inline=True)
-    embed.add_field(name="👤 Requested by", value=requester.display_name if requester else "Unknown", inline=True)
-    embed.add_field(name="🔄 Autoplay",    value="ON" if state.autoplay else "OFF",                  inline=True)
+        embed.set_thumbnail(url=art)
 
     if requester:
-        embed.set_footer(text=f"Requested by {requester.display_name}", icon_url=requester.display_avatar.url)
+        embed.set_footer(
+            text=f"Requested by {requester.display_name}  ·  homies_music",
+            icon_url=requester.display_avatar.url,
+        )
     else:
         avatar = bot.user.display_avatar.url if bot.user else None
         embed.set_footer(text="🎶 homies_music", icon_url=avatar)
 
-    embed.timestamp = discord.utils.utcnow()
     return embed
+
+
+def _cancel_progress_refresh(state: GuildState):
+    task = state.progress_task
+    state.progress_task = None
+    if task and not task.done():
+        task.cancel()
+
+
+async def _refresh_progress(guild: discord.Guild, state: GuildState, bot: commands.Bot):
+    current_task = asyncio.current_task()
+    try:
+        while state.player_message:
+            await asyncio.sleep(15)
+            player: wavelink.Player | None = guild.voice_client  # type: ignore
+            if not player or not player.current or not state.player_message:
+                return
+
+            view = MusicPlayerView(state, guild, bot)
+            embed = _player_embed(
+                player.current,
+                state,
+                bot,
+                player=player,
+                paused=player.paused,
+            )
+            await state.player_message.edit(embed=embed, view=view)
+    except asyncio.CancelledError:
+        raise
+    except discord.HTTPException as exc:
+        print(f"[music] player dashboard refresh failed: {exc}")
+    finally:
+        if state.progress_task is current_task:
+            state.progress_task = None
 
 
 def _history_embed(track: wavelink.Playable, state: GuildState, bot: commands.Bot, icon: str = "✅") -> discord.Embed:
@@ -163,22 +222,33 @@ class MusicPlayerView(discord.ui.View):
 
         player: wavelink.Player | None = guild.voice_client  # type: ignore
 
-        is_paused = player.paused if player else False
+        custom_emojis = getattr(bot, "player_emojis", {})
+        emoji_keys = {
+            "music:resume": "play",
+            "music:previous": "previous",
+            "music:pause": "pause",
+            "music:skip": "next",
+            "music:like": "like",
+        }
         for item in self.children:
-            if isinstance(item, discord.ui.Button) and item.label:
-                if "Pause" in item.label or "Resume" in item.label:
-                    item.label = "▶ Resume" if is_paused else "⏸ Pause"
-                    break
+            if isinstance(item, discord.ui.Button):
+                custom_emoji = custom_emojis.get(emoji_keys.get(item.custom_id))
+                if custom_emoji:
+                    item.emoji = custom_emoji
 
-        loop_on = (
-            player.queue.mode in (wavelink.QueueMode.loop, wavelink.QueueMode.loop_all)
-            if player else False
-        )
+        is_paused = player.paused if player else False
+        current_track = player.current if player else None
         for item in self.children:
-            if isinstance(item, discord.ui.Button) and item.label and "Loop" in item.label:
-                item.style = discord.ButtonStyle.success if loop_on else discord.ButtonStyle.secondary
-                item.label = "🔁 Loop ON" if loop_on else "🔁 Loop"
-                break
+            if not isinstance(item, discord.ui.Button):
+                continue
+            if item.custom_id == "music:resume":
+                item.disabled = not current_track or not is_paused
+            elif item.custom_id == "music:previous":
+                item.disabled = not state.history
+            elif item.custom_id == "music:pause":
+                item.disabled = not current_track or is_paused
+            elif item.custom_id in {"music:skip", "music:like"}:
+                item.disabled = not current_track
 
         if disabled:
             for child in self.children:
@@ -194,11 +264,29 @@ class MusicPlayerView(discord.ui.View):
         if not player or not player.current or not self.state.player_message:
             return
         view  = MusicPlayerView(self.state, self.guild, self.bot)
-        embed = _player_embed(player.current, self.state, self.bot, paused=player.paused)
+        embed = _player_embed(
+            player.current,
+            self.state,
+            self.bot,
+            player=player,
+            paused=player.paused,
+        )
         await _safe_edit(self.state.player_message, embed=embed, view=view)
 
-    # ── Row 0 ─────────────────────────────────────────────────────────────────
-    @discord.ui.button(emoji="⏮️", style=discord.ButtonStyle.secondary, row=0)
+    # Keep the five player actions together to match the compact dashboard.
+    @discord.ui.button(
+        emoji="▶️", style=discord.ButtonStyle.secondary, row=0, custom_id="music:resume"
+    )
+    async def btn_resume(self, interaction: discord.Interaction, _btn: discord.ui.Button):
+        await interaction.response.defer()
+        player = self.player
+        if player and player.current and player.paused:
+            await player.pause(False)
+            await self._update_player()
+
+    @discord.ui.button(
+        emoji="⏮️", style=discord.ButtonStyle.secondary, row=0, custom_id="music:previous"
+    )
     async def btn_previous(self, interaction: discord.Interaction, _btn: discord.ui.Button):
         await interaction.response.defer()
         if not self.state.history:
@@ -216,70 +304,48 @@ class MusicPlayerView(discord.ui.View):
         player.queue._queue.pop()
         await player.skip(force=True)
 
-    @discord.ui.button(label="⏸ Pause", style=discord.ButtonStyle.primary, row=0)
-    async def btn_pause_resume(self, interaction: discord.Interaction, _btn: discord.ui.Button):
+    @discord.ui.button(
+        emoji="⏸️", style=discord.ButtonStyle.secondary, row=0, custom_id="music:pause"
+    )
+    async def btn_pause(self, interaction: discord.Interaction, _btn: discord.ui.Button):
         await interaction.response.defer()
         player = self.player
-        if player:
-            await player.pause(not player.paused)
-        await self._update_player()
+        if player and player.current and not player.paused:
+            await player.pause(True)
+            await self._update_player()
 
-    @discord.ui.button(emoji="⏭️", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(
+        emoji="⏭️", style=discord.ButtonStyle.secondary, row=0, custom_id="music:skip"
+    )
     async def btn_skip(self, interaction: discord.Interaction, _btn: discord.ui.Button):
         await interaction.response.defer()
         player = self.player
         if player and player.current:
             await player.skip(force=True)
-        # on_wavelink_track_start will update the embed for the next track
 
-    # ── Row 1 ─────────────────────────────────────────────────────────────────
-    @discord.ui.button(label="🔀 Shuffle", style=discord.ButtonStyle.success, row=1)
-    async def btn_shuffle(self, interaction: discord.Interaction, _btn: discord.ui.Button):
-        await interaction.response.defer()
+    @discord.ui.button(
+        emoji="💜", style=discord.ButtonStyle.secondary, row=0, custom_id="music:like"
+    )
+    async def btn_like(self, interaction: discord.Interaction, _btn: discord.ui.Button):
         player = self.player
-        if player and len(player.queue) > 1:
-            player.queue.shuffle()
+        track = player.current if player else None
+        if not track:
+            return await interaction.response.send_message(
+                "Nothing is playing right now.", ephemeral=True
+            )
+
+        likers = self.state.liked_tracks.setdefault(track.identifier, set())
+        if interaction.user.id in likers:
+            likers.remove(interaction.user.id)
+            message = f"Removed ❤️ from **{track.title}**."
+        else:
+            likers.add(interaction.user.id)
+            message = f"Added ❤️ to **{track.title}**."
+        if not likers:
+            self.state.liked_tracks.pop(track.identifier, None)
+
+        await interaction.response.send_message(message, ephemeral=True)
         await self._update_player()
-
-    @discord.ui.button(label="🔁 Loop", style=discord.ButtonStyle.secondary, row=1)
-    async def btn_loop(self, interaction: discord.Interaction, _btn: discord.ui.Button):
-        await interaction.response.defer()
-        player = self.player
-        if player:
-            if player.queue.mode == wavelink.QueueMode.loop:
-                player.queue.mode = wavelink.QueueMode.normal
-            else:
-                player.queue.mode = wavelink.QueueMode.loop
-        await self._update_player()
-
-    @discord.ui.button(label="⏹ Stop", style=discord.ButtonStyle.danger, row=1)
-    async def btn_stop(self, interaction: discord.Interaction, _btn: discord.ui.Button):
-        await interaction.response.defer()
-        player = self.player
-        source = player.current if player else None
-        if source:
-            self.state.history.append(source)
-
-        old = self.state.player_message
-        self.state.player_message = None
-
-        if player:
-            player.queue.clear()
-            await player.stop()
-            await player.disconnect()
-
-        # Edit existing message to disabled/stopped state
-        frozen = (
-            _player_embed(source, self.state, self.bot)
-            if source
-            else discord.Embed(description="😴  Stopped.", color=C_GREY)
-        )
-        disabled_view = MusicPlayerView(self.state, self.guild, self.bot, disabled=True)
-        await _safe_edit(old, embed=frozen, view=disabled_view)
-
-        channel = self.state.text_channel or interaction.channel
-        if channel and source:
-            await channel.send(embed=_history_embed(source, self.state, self.bot, "⏹️"))
 
 
 # ── Cog ────────────────────────────────────────────────────────────────────────
@@ -322,6 +388,7 @@ class Music(commands.Cog):
         if player and not player.playing:
             old = state.player_message
             state.player_message = None
+            _cancel_progress_refresh(state)
             await _delete_message(old)
             if state.text_channel:
                 try:
@@ -351,9 +418,11 @@ class Music(commands.Cog):
         await _delete_message(old)
 
         view  = MusicPlayerView(state, guild, self.bot)
-        embed = _player_embed(player.current, state, self.bot)
+        embed = _player_embed(player.current, state, self.bot, player=player)
         msg   = await state.text_channel.send(embed=embed, view=view)
         state.player_message = msg
+        _cancel_progress_refresh(state)
+        state.progress_task = self.bot.loop.create_task(_refresh_progress(guild, state, self.bot))
 
     @commands.Cog.listener()
     async def on_wavelink_track_end(self, payload: wavelink.TrackEndEventPayload):
@@ -377,6 +446,8 @@ class Music(commands.Cog):
         # If next track already started, track_start handles the embed
         if player.current:
             return
+
+        _cancel_progress_refresh(state)
 
         # Handle fallback from track-end (rather than track-exception) so it
         # cannot race the separate Wavelink exception event or queue advance.
@@ -484,6 +555,7 @@ class Music(commands.Cog):
         self._cancel_inactivity(state)
         old = state.player_message
         state.player_message = None
+        _cancel_progress_refresh(state)
         await _delete_message(old)
         if state.text_channel:
             try:
@@ -643,6 +715,54 @@ class Music(commands.Cog):
             embed=self._simple_embed(f"⏭️  Skipped  —  Up next: {label}", C_YELLOW)
         )
 
+    @app_commands.command(name="shuffle", description="Shuffle the songs waiting in the queue")
+    async def shuffle(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        player: wavelink.Player | None = interaction.guild.voice_client  # type: ignore
+        if not player or len(player.queue) < 2:
+            return await interaction.followup.send(
+                embed=self._simple_embed("Add at least two songs to shuffle.", C_GREY),
+                ephemeral=True,
+            )
+        player.queue.shuffle()
+        await interaction.followup.send(
+            embed=self._simple_embed("🔀 Queue shuffled.", C_PURPLE),
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="loop", description="Toggle repeating the current song")
+    async def loop(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        player: wavelink.Player | None = interaction.guild.voice_client  # type: ignore
+        if not player:
+            return await interaction.followup.send(
+                embed=self._simple_embed("The player is not connected.", C_GREY),
+                ephemeral=True,
+            )
+
+        if player.queue.mode == wavelink.QueueMode.loop:
+            player.queue.mode = wavelink.QueueMode.normal
+            status = "off"
+        else:
+            player.queue.mode = wavelink.QueueMode.loop
+            status = "on"
+
+        if player.current and self.get_state(interaction.guild_id).player_message:
+            state = self.get_state(interaction.guild_id)
+            embed = _player_embed(
+                player.current,
+                state,
+                self.bot,
+                player=player,
+                paused=player.paused,
+            )
+            await _safe_edit(state.player_message, embed=embed, view=MusicPlayerView(state, player.guild, self.bot))
+
+        await interaction.followup.send(
+            embed=self._simple_embed(f"🔁 Repeat is **{status}**.", C_PURPLE),
+            ephemeral=True,
+        )
+
     # ── /queue ──────────────────────────────────────────────────────────────────
     @app_commands.command(name="queue", description="Show the current song queue")
     async def queue(self, interaction: discord.Interaction):
@@ -694,6 +814,7 @@ class Music(commands.Cog):
         self._cancel_inactivity(state)
         old = state.player_message
         state.player_message = None
+        _cancel_progress_refresh(state)
 
         if player:
             player.queue.clear()
@@ -719,6 +840,7 @@ class Music(commands.Cog):
         self._cancel_inactivity(state)
         old = state.player_message
         state.player_message = None
+        _cancel_progress_refresh(state)
         await _delete_message(old)
 
         if source and state.text_channel:
@@ -740,7 +862,15 @@ class Music(commands.Cog):
                 embed=self._simple_embed("❌  Nothing is playing right now.", C_RED), ephemeral=True
             )
         state = self.get_state(interaction.guild_id)
-        await interaction.followup.send(embed=_player_embed(player.current, state, self.bot, paused=player.paused))
+        await interaction.followup.send(
+            embed=_player_embed(
+                player.current,
+                state,
+                self.bot,
+                player=player,
+                paused=player.paused,
+            )
+        )
 
     # ── /eq ──────────────────────────────────────────────────────────────────────
     _EQ_LABELS: dict[str, str] = {

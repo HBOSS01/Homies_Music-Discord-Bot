@@ -93,6 +93,12 @@ start.bat
 
 This starts Lavalink first, waits for it to be ready, then starts the bot.
 
+The bot syncs five transparent purple player icons to server emojis at startup,
+replacing an existing icon when its image file changes. Give its server role
+**Manage Expressions** permission and leave five emoji slots available on the
+first setup. If Discord blocks emoji creation, the player falls back to standard
+Unicode icons.
+
 ---
 
 ## Slash Commands

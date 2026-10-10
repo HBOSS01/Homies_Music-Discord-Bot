@@ -8,18 +8,27 @@ plugins:
     allowDirectVideoIds: true
     allowDirectPlaylistIds: true
     clients:
-      - MUSIC
-      - ANDROID_VR
-      - WEBEMBEDDED
       - TV
+      - ANDROID_VR
+      - WEB
+      - MWEB
+      - TVHTML5_SIMPLY
+      - ANDROID_MUSIC
+      - WEBEMBEDDED
     oauth:
       enabled: true
       skipInitialization: true
       refreshToken: "${YOUTUBE_REFRESH_TOKEN}"
+    # Handles YouTube's changing player-signature scripts outside the plugin parser.
+    remoteCipher:
+      url: "https://cipher.kikkia.dev/"
+      userAgent: "homies_music"
 lavalink:
   plugins:
-    - dependency: "dev.lavalink.youtube:youtube-plugin:1.18.1"
-      repository: "https://maven.lavalink.dev/releases"
+    # Pinned snapshot includes the current TV client User-Agent playback fix.
+    - dependency: "dev.lavalink.youtube:youtube-plugin:2be8e542d3f6f178e048dca565892684c2e40177"
+      repository: "https://maven.lavalink.dev/snapshots"
+      snapshot: true
   server:
     password: "${LAVALINK_PASSWORD}"
     sources:

@@ -80,6 +80,7 @@ class GuildState:
         self.inactivity_task: asyncio.Task | None        = None
         self.eq_preset:       str                        = "flat"
         self.autoplay:        bool                       = False
+        self.search_fallbacks: set[str]                  = set()
 
 
 # ── Embed builders ─────────────────────────────────────────────────────────────
@@ -362,17 +363,76 @@ class Music(commands.Cog):
         guild = player.guild
         state = self.get_state(guild.id)
         track = payload.track
+        reason = payload.reason.upper()
+
+        # Lavalink also emits track-end events for failed loads and explicit
+        # stops. Logging the reason makes source/stream failures distinguishable
+        # from a track that actually finished playing.
+        print(f"[music] track ended: title={track.title!r}, reason={reason}")
+
+        load_failed = reason in {"LOAD_FAILED", "LOADFAILED"}
+        if track and not load_failed:
+            state.search_fallbacks.discard(track.identifier)
 
         # If next track already started, track_start handles the embed
         if player.current:
             return
 
-        if track:
+        # Handle fallback from track-end (rather than track-exception) so it
+        # cannot race the separate Wavelink exception event or queue advance.
+        if (
+            track
+            and load_failed
+            and track.source.lower() == "youtube"
+            and track.identifier in state.search_fallbacks
+        ):
+            state.search_fallbacks.discard(track.identifier)
+            search_query = f"{track.author} {track.title}".strip()
+            try:
+                alternatives = await wavelink.Playable.search(
+                    search_query,
+                    source=wavelink.TrackSource.SoundCloud,
+                )
+                if alternatives:
+                    fallback_track = alternatives[0]
+                    requester = state.requested_by.get(track.identifier)
+                    if requester:
+                        state.requested_by[fallback_track.identifier] = requester
+                    await player.play(fallback_track)
+                    print(f"[music] using SoundCloud fallback: title={fallback_track.title!r}")
+                    if state.text_channel:
+                        await state.text_channel.send(
+                            embed=self._simple_embed(
+                                f"⚠️ YouTube could not stream **{track.title}**. Trying SoundCloud: "
+                                f"**{fallback_track.title}**",
+                                C_YELLOW,
+                            )
+                        )
+                    return
+                print(f"[music] SoundCloud fallback found no match for {search_query!r}")
+            except Exception as fallback_error:
+                print(f"[music] SoundCloud fallback failed: {fallback_error}")
+
+        if track and reason == "FINISHED":
             state.history.append(track)
 
-        if state.text_channel and track:
+        if state.text_channel and track and reason == "FINISHED":
             try:
                 await state.text_channel.send(embed=_history_embed(track, state, self.bot, "✅"))
+            except Exception:
+                pass
+
+        if load_failed and state.text_channel:
+            failed_embed = discord.Embed(
+                description=(
+                    f"⚠️  Could not load **{track.title}**. Lavalink reported `{payload.reason}`; "
+                    "check the Lavalink console for the source error."
+                ),
+                color=C_RED,
+            )
+            self._footer(failed_embed)
+            try:
+                await state.text_channel.send(embed=failed_embed)
             except Exception:
                 pass
 
@@ -393,6 +453,20 @@ class Music(commands.Cog):
         await _safe_edit(state.player_message, embed=ended_embed, view=disabled_view)
 
         self._start_inactivity(guild, state)
+
+    @commands.Cog.listener()
+    async def on_wavelink_track_exception(self, payload: wavelink.TrackExceptionEventPayload):
+        player = payload.player
+        track = payload.track
+        exception = payload.exception
+        message = exception.get("message", "No message provided")
+        severity = exception.get("severity", "unknown")
+        cause = exception.get("cause", "unknown")
+
+        print(
+            f"[music] track exception: title={track.title!r}, severity={severity}, "
+            f"cause={cause}, message={message}"
+        )
 
     @commands.Cog.listener()
     async def on_voice_state_update(
@@ -444,8 +518,14 @@ class Music(commands.Cog):
 
         self._cancel_inactivity(state)
 
+        allow_search_fallback = not query.strip().lower().startswith(
+            ("http://", "https://", "www.")
+        )
+
         try:
-            tracks = await wavelink.Playable.search(query)
+            # Use regular YouTube video search for text queries; direct URLs
+            # continue to be resolved as URLs by Lavalink.
+            tracks = await wavelink.Playable.search(query, source=wavelink.TrackSource.YouTube)
         except Exception as exc:
             return await interaction.followup.send(
                 embed=self._simple_embed(f"❌  Search failed: `{exc}`", C_RED)
@@ -472,6 +552,8 @@ class Music(commands.Cog):
 
             for t in pl_tracks:
                 state.requested_by[t.identifier] = interaction.user
+                if allow_search_fallback:
+                    state.search_fallbacks.add(t.identifier)
 
             total_ms = sum(t.length or 0 for t in pl_tracks)
 
@@ -513,6 +595,8 @@ class Music(commands.Cog):
         # ── Single track ───────────────────────────────────────────────────────
         track = tracks[0]
         state.requested_by[track.identifier] = interaction.user
+        if allow_search_fallback:
+            state.search_fallbacks.add(track.identifier)
 
         if player.current:
             await player.queue.put_wait(track)
